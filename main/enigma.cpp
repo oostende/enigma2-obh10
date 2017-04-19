@@ -17,6 +17,7 @@
 #include <lib/base/eerror.h>
 #include <lib/base/init.h>
 #include <lib/base/init_num.h>
+#include <lib/base/nconfig.h>
 #include <lib/gdi/gmaindc.h>
 #include <lib/gdi/glcddc.h>
 #include <lib/gdi/grc.h>
@@ -38,6 +39,9 @@
 #include "version_info.h"
 
 #include <gst/gst.h>
+
+#include <lib/base/eerroroutput.h>
+ePtr<eErrorOutput> m_erroroutput;
 
 #ifdef OBJECT_DEBUG
 int object_total_remaining;
@@ -63,11 +67,34 @@ void keyEvent(const eRCKey &key)
 {
 	static eRCKey last(0, 0, 0);
 	static int num_repeat;
+	static int long_press_emulation_pushed = false;
+	static time_t long_press_emulation_start = 0;
 
 	ePtr<eActionMap> ptr;
 	eActionMap::getInstance(ptr);
+	/*eDebug("key.code : %02x \n", key.code);*/
 
-	if ((key.code == last.code) && (key.producer == last.producer) && key.flags & eRCKey::flagRepeat)
+	int flags = key.flags;
+	int long_press_emulation_key = eConfigManager::getConfigIntValue("config.usage.long_press_emulation_key");
+	if ((long_press_emulation_key > 0) && (key.code == long_press_emulation_key))
+	{
+		long_press_emulation_pushed = true;
+		long_press_emulation_start = time(NULL);
+		last = key;
+		return;
+	}
+
+	if (long_press_emulation_pushed && (time(NULL) - long_press_emulation_start < 10) && (key.producer == last.producer))
+	{
+		// emit make-event first
+		ptr->keyPressed(key.producer->getIdentifier(), key.code, key.flags);
+		// then setup condition for long-event
+		num_repeat = 3;
+		last = key;
+		flags = eRCKey::flagRepeat;
+	}
+
+	if ((key.code == last.code) && (key.producer == last.producer) && flags & eRCKey::flagRepeat)
 		num_repeat++;
 	else
 	{
@@ -87,7 +114,9 @@ void keyEvent(const eRCKey &key)
 		ptr->keyPressed(key.producer->getIdentifier(), 510 /* faked KEY_ASCII */, 0);
 	}
 	else
-		ptr->keyPressed(key.producer->getIdentifier(), key.code, key.flags);
+		ptr->keyPressed(key.producer->getIdentifier(), key.code, flags);
+
+	long_press_emulation_pushed = false;
 }
 
 /************************************************/
@@ -98,9 +127,6 @@ void keyEvent(const eRCKey &key)
 #include <lib/dvb/db.h>
 #include <lib/dvb/dvbtime.h>
 #include <lib/dvb/epgcache.h>
-
-/* Defined in eerror.cpp */
-void setDebugTime(bool enable);
 
 class eMain: public eApplication, public Object
 {
@@ -193,11 +219,11 @@ void quitMainloop(int exitCode)
 		if (fd >= 0)
 		{
 			if (ioctl(fd, 10 /*FP_CLEAR_WAKEUP_TIMER*/) < 0)
-				eDebug("[quitMainloop] FP_CLEAR_WAKEUP_TIMER failed: %m");
+				eDebug("FP_CLEAR_WAKEUP_TIMER failed (%m)");
 			close(fd);
 		}
 		else
-			eDebug("[quitMainloop] open /dev/dbox/fp0 for wakeup timer clear failed: %m");
+			eDebug("open /dev/dbox/fp0 for wakeup timer clear failed!(%m)");
 	}
 	exit_code = exitCode;
 	eApp->quit(0);
@@ -223,7 +249,6 @@ void catchTermSignal()
 
 int main(int argc, char **argv)
 {
-
 #ifdef MEMLEAK_CHECK
 	atexit(DumpUnfreed);
 #endif
@@ -234,22 +259,28 @@ int main(int argc, char **argv)
 
 	gst_init(&argc, &argv);
 
+	for (int i = 0; i < argc; i++)
+	{
+		if (!(strcmp(argv[i], "--debug-no-color")) or !(strcmp(argv[i], "--nc")))
+		{
+			logOutputColors = 0;
+		}
+	}
+
+	m_erroroutput = new eErrorOutput();
+	m_erroroutput->run();
+
 	// set pythonpath if unset
 	setenv("PYTHONPATH", eEnv::resolve("${libdir}/enigma2/python").c_str(), 0);
-	printf("[Enigma2] PYTHONPATH: %s\n", getenv("PYTHONPATH"));
-	printf("[Enigma2] DVB_API_VERSION %d DVB_API_VERSION_MINOR %d\n", DVB_API_VERSION, DVB_API_VERSION_MINOR);
+	printf("PYTHONPATH: %s\n", getenv("PYTHONPATH"));
+	printf("DVB_API_VERSION %d DVB_API_VERSION_MINOR %d\n", DVB_API_VERSION, DVB_API_VERSION_MINOR);
 
-	// get enigma2 debug level settings
-	debugLvl = getenv("ENIGMA_DEBUG_LVL") ? atoi(getenv("ENIGMA_DEBUG_LVL")) : 4;
-	if (debugLvl < 0)
-		debugLvl = 0;
-	printf("ENIGMA_DEBUG_LVL=%d\n", debugLvl);
-	if (getenv("ENIGMA_DEBUG_TIME"))
-		setDebugTime(atoi(getenv("ENIGMA_DEBUG_TIME")) != 0);
+	bsodLogInit();
 
 	ePython python;
 	eMain main;
 
+#if 1
 	ePtr<gMainDC> my_dc;
 	gMainDC::getInstance(my_dc);
 
@@ -275,7 +306,7 @@ int main(int argc, char **argv)
 
 /*	if (double_buffer)
 	{
-		eDebug("[MAIN] - double buffering found, enable buffered graphics mode.");
+		eDebug(" - double buffering found, enable buffered graphics mode.");
 		dsk.setCompositionMode(eWidgetDesktop::cmBuffered);
 	} */
 
@@ -286,6 +317,7 @@ int main(int argc, char **argv)
 	dsk_lcd.setDC(my_lcd_dc);
 
 	dsk.setBackgroundColor(gRGB(0,0,0,0xFF));
+#endif
 
 		/* redrawing is done in an idle-timer, so we have to set the context */
 	dsk.setRedrawTask(main);
@@ -293,7 +325,7 @@ int main(int argc, char **argv)
 
 	std::string active_skin = getConfigCurrentSpinner("config.skin.primary_skin");
 
-	eDebug("[MAIN] Loading spinners...");
+	eDebug("Loading spinners...");
 
 	{
 		int i;
@@ -310,23 +342,23 @@ int main(int argc, char **argv)
 			if (!wait[i])
 			{
 				if (!i)
-					eDebug("[MAIN] failed to load %s: %m", rfilename.c_str());
+					eDebug("failed to load %s! (%m)", rfilename.c_str());
 				else
-					eDebug("[MAIN] found %d spinner!", i);
+					eDebug("found %d spinner!", i);
 				break;
 			}
 		}
 		if (i)
-			my_dc->setSpinner(eRect(ePoint(25, 25), wait[0]->size()), wait, i);
+			my_dc->setSpinner(eRect(ePoint(100, 100), wait[0]->size()), wait, i);
 		else
-			my_dc->setSpinner(eRect(25, 25, 0, 0), wait, 1);
+			my_dc->setSpinner(eRect(100, 100, 0, 0), wait, 1);
 	}
 
 	gRC::getInstance()->setSpinnerDC(my_dc);
 
 	eRCInput::getInstance()->keyEvent.connect(slot(keyEvent));
 
-	printf("[MAIN] executing main\n");
+	printf("executing main\n");
 
 	bsodCatchSignals();
 	catchTermSignal();
@@ -336,7 +368,7 @@ int main(int argc, char **argv)
 	/* start at full size */
 	eVideoWidget::setFullsize(true);
 
-	// python.execute("mytest", "__main__");
+	//	python.execute("mytest", "__main__");
 	python.execFile(eEnv::resolve("${libdir}/enigma2/python/mytest.py").c_str());
 
 	/* restore both decoders to full size */
@@ -344,7 +376,7 @@ int main(int argc, char **argv)
 
 	if (exit_code == 5) /* python crash */
 	{
-		eDebug("[MAIN] (exit code 5)");
+		eDebug("(exit code 5)");
 		bsodFatal(0);
 	}
 
@@ -357,7 +389,7 @@ int main(int argc, char **argv)
 		p.clear();
 		p.flush();
 	}
-
+	m_erroroutput = NULL;
 	return exit_code;
 }
 
