@@ -63,10 +63,10 @@ class About(Screen):
 
 	def populate(self):
 		self["lab1"] = StaticText(_("Open Black Hole Image"))
-		self["lab2"] = StaticText(_("By Bh Team"))
+		self["lab2"] = StaticText(_("By ostende"))
 		model = None
 		AboutText = ""
-		self["lab3"] = StaticText(_("Support at") + " www.vuplus-community.net")
+		self["lab3"] = StaticText(_("Support at") + " www.startimes.com")
 
 		AboutText += _("Model:\t%s %s\n") % (getMachineBrand(), getMachineName())
 
